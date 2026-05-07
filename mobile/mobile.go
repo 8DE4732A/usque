@@ -10,6 +10,8 @@ import (
 	"net/netip"
 	"strings"
 
+	_ "golang.org/x/mobile/bind"
+
 	"github.com/Diniboy1123/usque/api"
 	"github.com/Diniboy1123/usque/config"
 	"github.com/Diniboy1123/usque/internal"
