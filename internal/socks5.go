@@ -110,6 +110,11 @@ func (s *SOCKS5Server) Start() error {
 	return s.listenAndServe()
 }
 
+// Shutdown stops the SOCKS5 server by closing the TCP listener and UDP connection.
+func (s *SOCKS5Server) Shutdown() {
+	_ = s.server.RunnerGroup.Done()
+}
+
 // listenAndServe mirrors socks5.Server.ListenAndServe but the UDP relay uses
 // udpReadBufPool. Datagrams reference the buffer until UDPHandle returns.
 func (s *SOCKS5Server) listenAndServe() error {

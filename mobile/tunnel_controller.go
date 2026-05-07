@@ -23,21 +23,30 @@ const (
 
 // TunnelController manages the lifecycle of a MASQUE tunnel (SOCKS5 or VPN mode).
 type TunnelController struct {
-	mu     sync.Mutex
-	ctx    context.Context
-	cancel context.CancelFunc
-	status string
-	done   chan struct{}
+	mu          sync.Mutex
+	ctx         context.Context
+	cancel      context.CancelFunc
+	status      string
+	done        chan struct{}
+	started     bool
+	socksServer socksShutdowner
+	tunDevice   *fdTunDevice // non-nil while VPN mode is running; closed by Stop() to unblock ReadPacket
+}
+
+type socksShutdowner interface {
+	Shutdown()
 }
 
 // NewTunnelController creates a new idle TunnelController.
 func NewTunnelController() *TunnelController {
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	close(done) // pre-closed so Stop() on an unstarted controller returns immediately
 	return &TunnelController{
 		ctx:    ctx,
 		cancel: cancel,
 		status: statusIdle,
-		done:   make(chan struct{}),
+		done:   done,
 	}
 }
 
@@ -60,16 +69,42 @@ func (c *TunnelController) setStatus(s string) {
 func (c *TunnelController) Stop() {
 	c.mu.Lock()
 	cancel := c.cancel
-	done := c.done
+	socks := c.socksServer
+	tun := c.tunDevice
 	c.mu.Unlock()
 
 	cancel()
+
+	if socks != nil {
+		socks.Shutdown()
+	}
+	// Close the tun fd to unblock any ReadPacket call that is parked in a blocking read.
+	if tun != nil {
+		_ = tun.Close()
+	}
+
+	// Re-read done after cancel so we always wait on the channel that the
+	// running goroutine will close (resetCtx may have replaced it).
+	c.mu.Lock()
+	done := c.done
+	c.mu.Unlock()
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		logf("TunnelController.Stop: timed out waiting for goroutines")
 	}
 	c.setStatus(statusIdle)
+}
+
+// WaitUntilStopped blocks until the tunnel goroutines have exited.
+// Returns immediately if the tunnel was never started.
+// Use this after StartVpn (which is non-blocking) to keep the calling thread alive.
+func (c *TunnelController) WaitUntilStopped() {
+	c.mu.Lock()
+	done := c.done
+	c.mu.Unlock()
+	<-done
 }
 
 // NotifyNetworkChanged triggers a reconnect cycle by cancelling the current context.
@@ -178,8 +213,16 @@ func (c *TunnelController) StartSocks(configJson, listenAddr, dnsAddrs, sni stri
 		return fmt.Errorf("USQUE_ERR_NETWORK: failed to create SOCKS5 server: %w", err)
 	}
 
+	c.mu.Lock()
+	c.socksServer = server
+	c.mu.Unlock()
+
 	logf("SOCKS5 proxy listening on %s", listenAddr)
-	if err := server.Start(); err != nil {
+	err = server.Start()
+	c.mu.Lock()
+	c.socksServer = nil
+	c.mu.Unlock()
+	if err != nil {
 		c.cancel()
 		return fmt.Errorf("USQUE_ERR_NETWORK: SOCKS5 server error: %w", err)
 	}
@@ -210,6 +253,9 @@ func (c *TunnelController) StartVpn(configJson string, tunFd int, dnsAddrs, sni 
 	}
 
 	ctx, _, done := c.resetCtx()
+	c.mu.Lock()
+	c.tunDevice = tunDevice
+	c.mu.Unlock()
 	c.setStatus(statusConnecting)
 
 	go c.runVpnSupervisor(ctx, done, tlsCfg, endpoint, tunDevice, mtu, useHTTP2)
@@ -228,6 +274,9 @@ func (c *TunnelController) runVpnSupervisor(
 ) {
 	defer func() {
 		_ = tunDevice.Close()
+		c.mu.Lock()
+		c.tunDevice = nil
+		c.mu.Unlock()
 		close(done)
 		c.setStatus(statusIdle)
 	}()

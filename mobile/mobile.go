@@ -3,6 +3,7 @@ package mobile
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -118,6 +119,78 @@ func GetConfigIPv6(configJson string) (string, error) {
 	return cfg.IPv6, nil
 }
 
+// EnrollExisting re-enrolls the existing private key from a config JSON with Cloudflare WARP
+// and returns an updated config JSON. If jwt is non-empty it is used as ZeroTrust team token.
+// Unlike EnrollDevice, this reuses the private key already stored in the config.
+func EnrollExisting(configJson, jwt string) (string, error) {
+	logf("EnrollExisting: re-enrolling existing key")
+
+	cfg, err := parseConfig(configJson)
+	if err != nil {
+		return "", err
+	}
+
+	// GetEcPrivateKey reads config.AppConfig, not the receiver — set it temporarily.
+	saved := config.AppConfig
+	config.AppConfig = cfg
+	privKey, err := cfg.GetEcPrivateKey()
+	config.AppConfig = saved
+	if err != nil {
+		return "", fmt.Errorf("USQUE_ERR_CONFIG: failed to get private key: %w", err)
+	}
+	publicKey, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	if err != nil {
+		return "", fmt.Errorf("USQUE_ERR_CONFIG: failed to marshal public key: %w", err)
+	}
+	privKeyBytes, err := x509.MarshalECPrivateKey(privKey)
+	if err != nil {
+		return "", fmt.Errorf("USQUE_ERR_CONFIG: failed to marshal private key: %w", err)
+	}
+
+	accountData := models.AccountData{
+		Token: cfg.AccessToken,
+		ID:    cfg.ID,
+	}
+
+	updatedAccountData, apiErr, err := api.EnrollKey(accountData, publicKey, "Android")
+	if err != nil {
+		if apiErr != nil && apiErr.HasErrorMessage(models.InvalidPublicKey) {
+			return "", fmt.Errorf("USQUE_ERR_INVALID_PUBKEY: %s", apiErr.ErrorsAsString("; "))
+		}
+		if apiErr != nil {
+			return "", fmt.Errorf("USQUE_ERR_AUTH: %v (API: %s)", err, apiErr.ErrorsAsString("; "))
+		}
+		return "", fmt.Errorf("USQUE_ERR_NETWORK: %w", err)
+	}
+
+	h2v4 := cfg.EndpointH2V4
+	if h2v4 == "" {
+		h2v4 = config.DefaultEndpointH2V4
+	}
+
+	updated := config.Config{
+		PrivateKey:     base64.StdEncoding.EncodeToString(privKeyBytes),
+		EndpointV4:     stripPortSuffix(updatedAccountData.Config.Peers[0].Endpoint.V4),
+		EndpointV6:     stripIPv6Brackets(updatedAccountData.Config.Peers[0].Endpoint.V6),
+		EndpointH2V4:   h2v4,
+		EndpointH2V6:   cfg.EndpointH2V6,
+		EndpointPubKey: updatedAccountData.Config.Peers[0].PublicKey,
+		License:        updatedAccountData.Account.License,
+		ID:             updatedAccountData.ID,
+		AccessToken:    cfg.AccessToken,
+		IPv4:           updatedAccountData.Config.Interface.Addresses.V4,
+		IPv6:           updatedAccountData.Config.Interface.Addresses.V6,
+	}
+
+	jsonBytes, err := json.Marshal(updated)
+	if err != nil {
+		return "", fmt.Errorf("USQUE_ERR_CONFIG: failed to marshal config: %w", err)
+	}
+
+	logf("EnrollExisting: success ipv4=%s ipv6=%s", updated.IPv4, updated.IPv6)
+	return string(jsonBytes), nil
+}
+
 // parseConfig deserializes a config JSON string into config.Config.
 func parseConfig(configJson string) (config.Config, error) {
 	var cfg config.Config
@@ -132,6 +205,12 @@ func buildTLSConfig(cfg config.Config, sni string) (*tls.Config, error) {
 	if sni == "" {
 		sni = internal.ConnectSNI
 	}
+
+	// GetEcPrivateKey / GetEcEndpointPublicKey read config.AppConfig, not the receiver.
+	// Temporarily set AppConfig so the methods use the right values.
+	saved := config.AppConfig
+	config.AppConfig = cfg
+	defer func() { config.AppConfig = saved }()
 
 	privKey, err := cfg.GetEcPrivateKey()
 	if err != nil {
