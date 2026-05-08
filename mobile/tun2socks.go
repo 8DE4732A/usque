@@ -260,6 +260,21 @@ func handleUDPRequest(ctx context.Context, r *udp.ForwarderRequest, firstHop, up
 	}
 	payload := buf[:n]
 
+	// When an upstream proxy is configured, UDP ASSOCIATE relay addresses returned
+	// by the upstream are unreachable from here (they point to the upstream's
+	// loopback). Use DNS-over-TCP through the SOCKS5 CONNECT chain instead.
+	if upstreamSocks5 != "" {
+		reply, err := sendUDPviaTCP(ctx, firstHop, upstreamSocks5, dst, payload)
+		if err != nil {
+			log.Printf("tun2socks: UDP(tcp) %s: %v", dst, err)
+			return
+		}
+		if _, err := udpConn.Write(reply); err != nil {
+			log.Printf("tun2socks: UDP reply write: %v", err)
+		}
+		return
+	}
+
 	reply, err := sendUDP(ctx, firstHop, upstreamSocks5, dst, payload)
 	if err != nil {
 		log.Printf("tun2socks: UDP %s: %v", dst, err)
@@ -381,6 +396,53 @@ func sendUDP(ctx context.Context, firstHop, upstreamSocks5 string, dst netip.Add
 		return nil, err
 	}
 	return stripUDPFrame(buf[:n])
+}
+
+// sendUDPviaTCP sends a UDP payload over a TCP SOCKS5 CONNECT tunnel.
+// Used in two-hop mode where the upstream's UDP ASSOCIATE relay address is
+// unreachable from the client side. The payload is framed as DNS-over-TCP
+// (2-byte length prefix) when dst port is 53; otherwise it is forwarded raw
+// over the TCP stream and the first response chunk is returned.
+func sendUDPviaTCP(ctx context.Context, firstHop, upstreamSocks5 string, dst netip.AddrPort, payload []byte) ([]byte, error) {
+	conn, err := dialTCP(ctx, firstHop, upstreamSocks5, dst)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	// DNS-over-TCP: prefix with 2-byte big-endian length.
+	if dst.Port() == 53 {
+		lenBuf := [2]byte{byte(len(payload) >> 8), byte(len(payload))}
+		if _, err := conn.Write(lenBuf[:]); err != nil {
+			return nil, err
+		}
+		if _, err := conn.Write(payload); err != nil {
+			return nil, err
+		}
+		// Read 2-byte length prefix of the response.
+		var respLen [2]byte
+		if _, err := io.ReadFull(conn, respLen[:]); err != nil {
+			return nil, err
+		}
+		n := int(respLen[0])<<8 | int(respLen[1])
+		resp := make([]byte, n)
+		if _, err := io.ReadFull(conn, resp); err != nil {
+			return nil, err
+		}
+		return resp, nil
+	}
+
+	// Non-DNS UDP over TCP: send raw, read one chunk back.
+	if _, err := conn.Write(payload); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 65535)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
 }
 
 // dialTCPRaw opens a raw TCP connection to the exit proxy (no final CONNECT).
