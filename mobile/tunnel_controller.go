@@ -21,6 +21,12 @@ const (
 	statusReconnecting = "reconnecting"
 )
 
+// SocketProtector is implemented by the Android VPN service to protect sockets
+// from being routed back into the TUN device.
+type SocketProtector interface {
+	Protect(fd int) bool
+}
+
 // TunnelController manages the lifecycle of a MASQUE tunnel (SOCKS5 or VPN mode).
 type TunnelController struct {
 	mu          sync.Mutex
@@ -137,8 +143,9 @@ func (c *TunnelController) resetCtx() (context.Context, context.CancelFunc, chan
 //   - mtu:         MTU (typically 1280)
 //   - useIPv6:     use IPv6 MASQUE endpoint
 //   - useHTTP2:    use HTTP/2 over TCP instead of HTTP/3 over QUIC
+//   - protector:   optional SocketProtector (Android VPN service); may be nil
 func (c *TunnelController) StartSocks(configJson, listenAddr, dnsAddrs, sni string,
-	mtu int, useIPv6, useHTTP2 bool) error {
+	mtu int, useIPv6, useHTTP2 bool, protector SocketProtector) error {
 
 	cfg, err := parseConfig(configJson)
 	if err != nil {
@@ -180,6 +187,10 @@ func (c *TunnelController) StartSocks(configJson, listenAddr, dnsAddrs, sni stri
 			c.setStatus(statusIdle)
 		}()
 
+		var protectFn func(fd int)
+		if protector != nil {
+			protectFn = func(fd int) { protector.Protect(fd) }
+		}
 		maintainCfg := api.MaintainTunnelConfig{
 			TLSConfig:       tlsCfg,
 			KeepalivePeriod: 30 * time.Second,
@@ -189,6 +200,7 @@ func (c *TunnelController) StartSocks(configJson, listenAddr, dnsAddrs, sni stri
 			ReconnectDelay:  1 * time.Second,
 			AlwaysReconnect: true,
 			UseHTTP2:        useHTTP2,
+			SocketProtect:   protectFn,
 		}
 		c.setStatus(statusConnected)
 		api.MaintainTunnel(ctx, maintainCfg)

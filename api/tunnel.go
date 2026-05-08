@@ -170,6 +170,10 @@ type MaintainTunnelConfig struct {
 	// parent process env for OnConnect / OnDisconnect invocations. USQUE_EVENT
 	// and USQUE_ENDPOINT are set by MaintainTunnel itself.
 	HookEnv map[string]string
+	// SocketProtect, if non-nil, is called with each outbound socket fd just
+	// after it is created. On Android this should call VpnService.protect() so
+	// the socket bypasses the TUN device and avoids a routing loop.
+	SocketProtect func(fd int)
 }
 
 // cloneHookEnv returns a shallow copy of src so concurrent hook invocations
@@ -251,6 +255,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			internal.ConnectURI,
 			cfg.Endpoint,
 			cfg.UseHTTP2,
+			cfg.SocketProtect,
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
