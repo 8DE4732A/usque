@@ -24,6 +24,7 @@ var socksCmd = &cobra.Command{
 			cmd.Println("Config not loaded. Please register first.")
 			return
 		}
+		log.Println("Hint: l4-socks is faster for TCP-only SOCKS use cases.")
 
 		sni, err := cmd.Flags().GetString("sni-address")
 		if err != nil {
@@ -263,9 +264,9 @@ var socksCmd = &cobra.Command{
 		})
 
 		resolver := &internal.TunnelDNSResolver{
-			DNSAddrs:        dnsAddrs,
-			Timeout:         dnsTimeout,
-			UseOSResolver:   localDNS && systemDNS,
+			DNSAddrs:      dnsAddrs,
+			Timeout:       dnsTimeout,
+			UseOSResolver: localDNS && systemDNS,
 		}
 		if !localDNS {
 			resolver.TunNet = tunNet

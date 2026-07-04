@@ -31,16 +31,7 @@ type TunnelDNSResolver struct {
 // Resolve performs a DNS lookup using the provided DNS resolvers.
 // It tries each resolver in order until one succeeds, sending queries either through the tunnel
 // or over the system network depending on TunNet.
-//
-// Parameters:
-//   - ctx: context.Context - The context for the DNS lookup.
-//   - name: string - The domain name to resolve.
-//
-// Returns:
-//   - context.Context: The original context for the DNS lookup.
-//   - net.IP: The resolved IP address.
-//   - error: An error if the lookup fails.
-func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (net.IP, error) {
 	if r.UseOSResolver {
 		queryCtx := ctx
 		var cancel context.CancelFunc
@@ -50,16 +41,16 @@ func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Co
 		}
 		ips, err := net.DefaultResolver.LookupIP(queryCtx, "ip", name)
 		if err != nil {
-			return ctx, nil, err
+			return nil, err
 		}
 		if len(ips) == 0 {
-			return ctx, nil, fmt.Errorf("no IP address for %q", name)
+			return nil, fmt.Errorf("no IP address for %q", name)
 		}
-		return ctx, ips[0], nil
+		return ips[0], nil
 	}
 
 	if len(r.DNSAddrs) == 0 {
-		return ctx, nil, fmt.Errorf("no DNS servers configured")
+		return nil, fmt.Errorf("no DNS servers configured")
 	}
 
 	queryCtx := ctx
@@ -110,12 +101,12 @@ func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Co
 			if cancel != nil {
 				cancel()
 			}
-			return ctx, res.ip, nil
+			return res.ip, nil
 		}
 		lastErr = res.err
 	}
 
-	return ctx, nil, fmt.Errorf("all DNS servers failed: %v", lastErr)
+	return nil, fmt.Errorf("all DNS servers failed: %v", lastErr)
 }
 
 // NewNetstackResolver returns a *net.Resolver that uses the tunnel network stack

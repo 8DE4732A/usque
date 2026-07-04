@@ -2,7 +2,7 @@
 
 🥚➡️🍏🍎
 
-Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel, a SOCKS5 proxy, and a HTTP proxy.
+Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel, SOCKS5 and HTTP proxies, and faster TCP-only L4 proxy variants.
 
 ## Table of Contents
 
@@ -21,6 +21,7 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
       - [Routes on Windows](#routes-on-windows)
     - [SOCKS5 Proxy Mode (easy, cross-platform)](#socks5-proxy-mode-easy-cross-platform)
     - [HTTP Proxy Mode (easy, cross-platform)](#http-proxy-mode-easy-cross-platform)
+    - [L4 Proxy Modes (easy, cross-platform)](#l4-proxy-modes-easy-cross-platform)
     - [Port Forwarding Mode (for Advanced Users, cross-platform)](#port-forwarding-mode-for-advanced-users-cross-platform)
     - [Connect/Disconnect Hooks](#connectdisconnect-hooks)
       - [Example on Linux](#example-on-linux)
@@ -50,7 +51,7 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
 
 ## Installation
 
-You can download the latest release from the [releases page](https://github.com/Diniboy1123/usque/releases). For now, Android (`arm64`), Linux (`armv5`, `armv6`, `armv7`, `arm64`, `amd64`), Windows (`arm64`, `amd64`) and Darwin (`arm64`, `amd64`) binaries are provided. **However only the Linux `amd64` binary was tested.** If you have a different platform, you can build from source.
+You can download the latest release from the [releases page](https://github.com/Diniboy1123/usque/releases). For now, Android (`arm64`), Linux (`armv5`, `armv6`, `armv7`, `arm64`, `amd64`), Windows (`arm64`, `amd64`, `386`) and Darwin (`arm64`, `amd64`) binaries are provided. **However only the Linux `amd64` binary was tested.** If you have a different platform, you can build from source.
 
 Extract the archive and you will find a binary named `usque` in the root directory. You can move this binary to a directory in your `PATH` to make it accessible from anywhere.
 
@@ -58,7 +59,7 @@ Extract the archive and you will find a binary named `usque` in the root directo
 
 Since the tool is written in Go, it should be rather trivial.
 
-1. Ensure that you have Go installed on your system. You can download it from [here](https://golang.org/dl/). At least Go 1.25.5 is required.
+1. Ensure that you have Go installed on your system. You can download it from [here](https://golang.org/dl/). At least Go 1.26.3 is required.
 2. Clone this repository and switch to the project's root directory
 3. Build the project using the following command:
 ```shell
@@ -96,14 +97,17 @@ Usage:
   usque [command]
 
 Available Commands:
-  completion  Generate the autocompletion script for the specified shell
-  enroll      Enrolls a MASQUE private key and switches mode
-  help        Help about any command
-  http-proxy  Expose Warp as an HTTP proxy with CONNECT support
-  nativetun   Expose Warp as a native TUN device
-  portfw      Forward ports through a MASQUE tunnel
-  register    Register a new client and enroll a device key
-  socks       Expose Warp as a SOCKS5 proxy
+  completion    Generate the autocompletion script for the specified shell
+  enroll        Enrolls a MASQUE private key and switches mode
+  help          Help about any command
+  http-proxy    Expose Warp as an HTTP proxy with CONNECT support
+  l4-http-proxy Expose Warp as an L4 TCP-only HTTP proxy with CONNECT support
+  l4-socks      Expose Warp as an L4 TCP-only SOCKS5 proxy
+  nativetun     Expose Warp as a native TUN device
+  portfw        Forward ports through a MASQUE tunnel
+  register      Register a new client and enroll a device key
+  socks         Expose Warp as a SOCKS5 proxy
+  version       Print the version number of usque
 
 Flags:
   -c, --config string   config file (default is config.json) (default "config.json")
@@ -150,7 +154,7 @@ $ ./usque enroll
 
 ### Native Tunnel Mode (for Advanced Users, Linux and Windows only!)
 
-The native tunnel is probably the most **efficient** mode of operation *(as of now)*. 
+The native tunnel is a good choice when you want a real network interface. It is also one of the faster modes of operation.
 
 #### On Linux
 
@@ -247,6 +251,9 @@ route add ::/0 [TUNNEL_GATEWAY] metric 1 if [TUN_INTERFACE_INDEX]
 
 ### SOCKS5 Proxy Mode (easy, cross-platform)
 
+> [!TIP]
+> If you are OK with using QUIC (UDP) to connect to WARP and don't need UDP support for your SOCKS proxy, [L4 mode](#l4-proxy-modes-easy-cross-platform) is more efficient.
+
 If you just want to expose the tunnel as a quickly deployable proxy and your client supports SOCKS5, this mode is for you. It **supports both IPv4 and IPv6**. **TCP and UDP** even! It is also **cross-platform** and doesn't require any special kernel modules or root privileges. However it emulates an entire user-space network stack, so it can be resource hungry.
 
 To start a SOCKS5 proxy, you can run:
@@ -280,6 +287,9 @@ curl -x socks5://myuser:mypass@localhost:8080 https://cloudflare.com/cdn-cgi/tra
 
 ### HTTP Proxy Mode (easy, cross-platform)
 
+> [!TIP]
+> If you are OK with using QUIC (UDP) to connect to WARP, [L4 mode](#l4-proxy-modes-easy-cross-platform) is more efficient.
+
 Another easy to "*get up and running*" mode of operation is the HTTP proxy mode. **Almost all clients support HTTP proxies**. Regular HTTP unencrypted traffic sent to this proxy will simply be forwarded to the WARP network. For HTTPS and any other **TCP traffic**, the proxy exposes a HTTP `CONNECT` method. This mode is **cross-platform** and doesn't require any special kernel modules or root privileges. However it emulates an entire user-space network stack, so it can be resource hungry.
 
 To start a HTTP proxy, you can run:
@@ -310,6 +320,24 @@ curl -x http://myuser:mypass@localhost:8080 https://cloudflare.com/cdn-cgi/trace
 
 > [!NOTE]
 > For now only one `user:pass` is supported.
+
+### L4 Proxy Modes (easy, cross-platform)
+
+If your clients are fine with TCP only proxying, the L4 modes are the lighter option. They use direct HTTP/3 CONNECT streams, skip UDP/datagram handling, and avoid the extra user-space networking stack that the full SOCKS5 and HTTP proxy modes need. They are cross-platform and do not require elevated privileges.
+
+Use `l4-http-proxy` when you want an HTTP proxy with CONNECT support, or `l4-socks` when you want SOCKS5 compatibility:
+
+```shell
+$ ./usque l4-http-proxy
+```
+
+```shell
+$ ./usque l4-socks
+```
+
+They support the same bind, port, auth, DNS, and hook flags as the other proxy modes. **For TCP-only workloads, these modes should generally outperform the full proxy stack.**
+
+More details [in the wiki](https://github.com/Diniboy1123/usque/wiki/L4-proxy-mode).
 
 ### Port Forwarding Mode (for Advanced Users, cross-platform)
 
@@ -354,7 +382,7 @@ Hooks run **fire-and-forget** in the background, so a hung hook cannot stall the
 The hook subprocess inherits the parent environment (so `PATH`, `HOME`, etc. work normally) plus the following `USQUE_*` variables:
 
 - `USQUE_EVENT`: `connect` or `disconnect`.
-- `USQUE_MODE`: `nativetun`, `socks`, `http-proxy`, or `portfw`.
+- `USQUE_MODE`: `nativetun`, `socks`, `http-proxy`, `l4-socks`, `l4-http-proxy`, or `portfw`.
 - `USQUE_IFACE`: tun interface name (only set in `nativetun` mode).
 - `USQUE_IPV4`: internal IPv4 from the config.
 - `USQUE_IPV6`: internal IPv6 from the config.

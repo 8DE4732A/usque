@@ -95,8 +95,14 @@ func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
 }
 
 func (n *NetstackAdapter) WritePacket(pkt []byte) error {
-	// Write expects a slice of packet buffers.
-	_, err := n.dev.Write([][]byte{pkt}, 0)
+	packetBufsPtr := n.tunnelBufPool.Get().(*[][]byte)
+	defer func() {
+		(*packetBufsPtr)[0] = nil
+		n.tunnelBufPool.Put(packetBufsPtr)
+	}()
+
+	(*packetBufsPtr)[0] = pkt
+	_, err := n.dev.Write(*packetBufsPtr, 0)
 	return err
 }
 
@@ -148,6 +154,10 @@ func NewWaterAdapter(iface *water.Interface) TunnelDevice {
 // pump may still be parked in a blocking TUN read during this window; the
 // readMu serializes any overlap with the next cycle's device reader.
 const pumpShutdownGrace = 2 * time.Second
+
+// CONNECT-IP context ID 0 is encoded as a one-byte QUIC varint. Reserving this
+// byte before packets lets connect-ip-go send outbound datagrams in place.
+const datagramContextIDHeadroom = 1
 
 // MaintainTunnelConfig contains runtime settings for tunnel maintenance.
 type MaintainTunnelConfig struct {
@@ -224,7 +234,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 	}
 
-	packetBufferPool := NewNetBuffer(cfg.MTU)
+	packetBufferPool := NewNetBuffer(cfg.MTU + datagramContextIDHeadroom)
 
 	for {
 		if ctx.Err() != nil {
@@ -234,7 +244,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		if !cfg.AlwaysReconnect {
 			log.Println("Tunnel idle. Waiting for outbound activity before reconnecting...")
 			buf := packetBufferPool.Get()
-			n, err := cfg.Device.ReadPacket(buf)
+			n, err := cfg.Device.ReadPacket(buf[datagramContextIDHeadroom:])
 			if err != nil {
 				packetBufferPool.Put(buf)
 				log.Printf("Failed to read from TUN device while waiting for activity: %v", err)
@@ -312,7 +322,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				}
 				buf := packetBufferPool.Get()
 				readMu.Lock()
-				n, err := cfg.Device.ReadPacket(buf)
+				n, err := cfg.Device.ReadPacket(buf[datagramContextIDHeadroom:])
 				readMu.Unlock()
 				if err != nil {
 					packetBufferPool.Put(buf)
@@ -323,7 +333,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					packetBufferPool.Put(buf)
 					return
 				}
-				icmp, err := ipConn.WritePacket(buf[:n])
+				icmp, err := ipConn.WritePacketBuffer(buf, datagramContextIDHeadroom, n)
 				if err != nil {
 					packetBufferPool.Put(buf)
 					if errors.As(err, new(*connectip.CloseError)) {
@@ -349,10 +359,8 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		go func() {
 			defer wg.Done()
-			buf := packetBufferPool.Get()
-			defer packetBufferPool.Put(buf)
 			for {
-				n, err := ipConn.ReadPacket(buf, true)
+				packet, err := ipConn.ReadPacketZeroCopy(true)
 				if err != nil {
 					if cfg.UseHTTP2 {
 						errChan <- fmt.Errorf("connection closed while reading from IP connection: %w", err)
@@ -365,7 +373,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					log.Printf("Error reading from IP connection: %v, continuing...", err)
 					continue
 				}
-				if err := cfg.Device.WritePacket(buf[:n]); err != nil {
+				if err := cfg.Device.WritePacket(packet); err != nil {
 					errChan <- fmt.Errorf("failed to write to TUN device: %w", err)
 					return
 				}

@@ -26,6 +26,7 @@ var httpProxyCmd = &cobra.Command{
 			cmd.Println("Config not loaded. Please register first.")
 			return
 		}
+		log.Println("Hint: l4-http-proxy is faster for TCP-only HTTP proxy use cases.")
 
 		sni, err := cmd.Flags().GetString("sni-address")
 		if err != nil {

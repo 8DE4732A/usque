@@ -28,4 +28,5 @@ go.work.sum
 config*.json*
 usque
 usque.exe
-dist/
+dist/.vscode/
+.vscode/

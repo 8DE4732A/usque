@@ -143,9 +143,27 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		return nil, nil, nil, nil, errors.New("missing HTTP/3 UDP endpoint")
 	}
 
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		udpConn, tr, ipConn, rsp, err := connectTunnelHTTP3(ctx, tlsConfig, quicConfig, template, additionalHeaders, quicEndpoint)
+		if err == nil {
+			return udpConn, tr, ipConn, rsp, nil
+		}
+		if strings.Contains(err.Error(), "tls: access denied") {
+			return nil, nil, nil, nil, errors.New("login failed! Please double-check if your tls key and cert is enrolled in the Cloudflare Access service")
+		}
+		lastErr = err
+		if !isRetryableHTTP3ConnectFailure(err) {
+			break
+		}
+	}
+	return nil, nil, nil, nil, fmt.Errorf("failed to dial connect-ip: %w", lastErr)
+}
+
+func connectTunnelHTTP3(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, template *uritemplate.Template, additionalHeaders http.Header, endpoint *net.UDPAddr) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
 	var udpConn *net.UDPConn
 	var err error
-	if quicEndpoint.IP.To4() == nil {
+	if endpoint.IP.To4() == nil {
 		udpConn, err = net.ListenUDP("udp", &net.UDPAddr{
 			IP:   net.IPv6zero,
 			Port: 0,
@@ -165,15 +183,10 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		}
 	}
 
-	conn, err := quic.Dial(
-		ctx,
-		udpConn,
-		quicEndpoint,
-		tlsConfig,
-		quicConfig,
-	)
+	conn, err := quic.Dial(ctx, udpConn, endpoint, tlsConfig, quicConfig)
 	if err != nil {
-		return udpConn, nil, nil, nil, err
+		_ = udpConn.Close()
+		return nil, nil, nil, nil, err
 	}
 
 	tr := &http3.Transport{
@@ -193,13 +206,20 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 	if err != nil {
 		_ = tr.Close()
 		_ = conn.CloseWithError(0, "connect-ip dial failed")
-		if strings.Contains(err.Error(), "tls: access denied") {
-			return udpConn, nil, nil, nil, errors.New("login failed! Please double-check if your tls key and cert is enrolled in the Cloudflare Access service")
-		}
-		return udpConn, nil, nil, nil, fmt.Errorf("failed to dial connect-ip: %w", err)
+		_ = udpConn.Close()
+		return nil, nil, nil, nil, err
 	}
 
 	return udpConn, tr, ipConn, rsp, nil
+}
+
+func isRetryableHTTP3ConnectFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "failed to read response") &&
+		strings.Contains(msg, "PROTOCOL_VIOLATION")
 }
 
 // newHTTP2Client builds an HTTP client for CONNECT-IP over HTTP/2.
